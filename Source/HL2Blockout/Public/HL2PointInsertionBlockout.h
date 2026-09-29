@@ -32,10 +32,11 @@ enum class EHL2BlockoutMaterial : uint8
 };
 
 /**
- * Grey-box layout inspired by Half-Life 2's first chapter, "Point Insertion":
- * train arrival -> platform -> Civil Protection checkpoint (with interrogation
- * room detour) -> station hall -> City 17 plaza (Citadel in the distance) ->
- * street -> apartment block stairwell -> rooftop gap jump.
+ * Grey-box layout of Half-Life 2's first chapter, "Point Insertion", following
+ * its overview map: rail yard -> arrival platform under the long canopy (next
+ * to the arched train shed) -> security queue and interrogation room -> station
+ * hall -> City 17 plaza -> street -> courtyard -> Resistance apartments ->
+ * rooftops -> attic -> end room.
  *
  * The whole layout is authored in Hammer units (1 HU = 1.905 cm, the same
  * scale PBCharacterMovement uses) and rebuilt from code in OnConstruction, so
@@ -127,12 +128,30 @@ private:
 	void ApplyLightingVisibility();
 	void SpawnPhysicsProps();
 
-	void BuildTrainPlatform();
-	void BuildCheckpoint();
+	void BuildWorldBounds();
+	void BuildRailYard();
+	void BuildArrivalPlatform();
+	void BuildTrainShed();
+	void BuildSecurity();
 	void BuildStationHall();
 	void BuildPlaza();
-	void BuildStreetAndApartments();
+	void BuildStreet();
+	void BuildApartments();
+	void BuildRooftops();
+	void BuildAtticAndEnd();
 	void BuildSkyline();
+
+	/** Rails and sleepers along X, centred on CenterY. */
+	void Track(float X0, float X1, float CenterY);
+
+	/** Barrel vault along X spanning [Y0, Y1], springing from BaseZ. The middle OpenTopSegments are left open. */
+	void Vault(EHL2BlockoutMaterial Mat, float X0, float X1, float Y0, float Y1, float BaseZ, float RiseHU, int32 Segments, float ThicknessHU, int32 OpenTopSegments);
+
+	/** Stepped (walkable) gable roof filling Min/Max, ridge along RidgeAxis (0 = X, 1 = Y). */
+	void GableRoof(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU, int32 RidgeAxis, int32 Steps);
+
+	/** Grid of window panels inside a thin facade box (ThinAxis 0 = X, 1 = Y), one row per floor. */
+	void FacadeWindows(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU, int32 ThinAxis, float SpacingHU, float FloorHeightHU, float WidthHU, float HeightHU);
 
 	/** Axis-aligned box from min/max corners in Hammer units. */
 	void Box(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU);

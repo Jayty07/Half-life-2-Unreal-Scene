@@ -53,16 +53,25 @@ from `UPBPlayerMovement`. World gravity is set to HL2's `sv_gravity 600` (`-1143
 `AHL2PointInsertionBlockout` builds all geometry in its construction script from Hammer units
 (`1 HU = 1.905 cm`) using instanced engine cubes/cylinders, one instanced component per palette material:
 
-1. **Train & platform** - arriving train car (spawn), coupled cars, a parked train, tracks, canopy, benches, screens.
-2. **Checkpoint** - queue corridor with railings, Combine gate and scanner, interrogation room and back hallway.
-3. **Station hall** - pillars, ticket booth, Breencast screen, mezzanine and stairs.
-4. **Plaza** - Combine wall, monument/pylon, lamp posts, barricades, vehicles, crates.
-5. **Street & apartments** - Civil Protection barricade, apartment block with a switchback stairwell to the roof.
-6. **Rooftop** - open east parapet and a 96 HU gap to the neighbouring roof.
-7. **Skyline** - distant City 17 blocks and the Citadel.
+The footprint follows the Point Insertion overview map (+X from the rail yard towards the plaza, +Y from the tracks
+towards the apartments):
+
+1. **Rail yard (Start)** - tunnel portals, six tracks, signal gantry and box, tenement, arched warehouse, parked freight.
+2. **Arrival platform** - long pitched canopy, benches, Breencast screens, the arriving train (spawn in the middle car).
+3. **Train shed** - glazed barrel-vault shed with island/side platforms and parked trains; skylit building beside it.
+4. **Security** - queue railings, Combine scanner gate, CP desk, interrogation room, corridor to the hall.
+5. **Station hall** - arched roof, great window, pillars, ticket booths, Breencast screen, mezzanine, steps to the plaza.
+6. **City 17 plaza** - Combine wall, Breen monument ringed by trees, domed civic building and clock tower, elevated
+   railway, barricades, APC.
+7. **Street -> courtyard -> Resistance apartments** - barricaded street, alley into the courtyard, four-storey block
+   with a switchback stairwell to the roof.
+8. **Rooftops -> attic -> End** - drop to the neighbouring roof, plank, stepped pitched roof, water-tower roof, plank
+   into the attic window, stairs down into the end room; factory smokestacks nearby. Fire escapes lead back up from
+   each alley.
+9. **Skyline** - distant City 17 blocks and the Citadel.
 
 Details panel options: `Palette` (per-material colours), `bIncludeSkyAndLighting` (sun, sky light, atmosphere, fog),
-`bSpawnPhysicsProps` (cans, crates, oil drum spawned on BeginPlay) and a **Rebuild Blockout** button.
+`bSpawnPhysicsProps` (cans, crates, oil drums spawned on BeginPlay) and a **Rebuild Blockout** button.
 
 Edit layout in `Source/HL2Blockout/Private/HL2PointInsertionBlockout.cpp` (`Build*` functions), recompile, and the
 placed actor regenerates.
