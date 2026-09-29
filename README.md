@@ -43,6 +43,8 @@ exists) and starts you on the train, so even an empty level is playable.
 | Noclip | V |
 
 Mouse sensitivity, Y inversion and hold/toggle crouch are exposed on `AHL2Character` (`Config/DefaultGame.ini`).
+`MouseSensitivity` is degrees per mouse count, like HL2's `m_yaw * sensitivity` (default `0.066` = HL2 sensitivity 3);
+`Config/DefaultInput.ini` sets the engine mouse axis scale to 1 so this value is not scaled again.
 Input actions are created at runtime; assign your own Enhanced Input assets on a Blueprint child to override them.
 
 Movement (bunnyhopping, air strafing, crouch jumping, jump boost, HL2 friction and step-up) comes
