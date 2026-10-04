@@ -78,12 +78,46 @@ Details panel options: `Palette` (per-material colours), `bIncludeSkyAndLighting
 Edit layout in `Source/HL2Blockout/Private/HL2PointInsertionBlockout.cpp` (`Build*` functions), recompile, and the
 placed actor regenerates.
 
+## Optional: Neighborhoods blockout
+
+`AHL2NeighborhoodsBlockout` is a second, geometry-only greybox: a sprawling, overgrown storybook old town (warm
+plaster, crooked timber houses with steep roofs, dormers, towers, bridges, ruins). It does not replace Point
+Insertion, is not generated on startup and adds **no gameplay systems** - blockers, hidden rooms, upgrade ledges
+and the maintenance robot are static placeholder shapes (bright magenta `Marker` material). Houses are solid shells
+with decorative doors and cannot be entered.
+
+Create it from the Output Log (Python), then open `/Game/Maps/Neighborhoods` and press **Play** (spawn: hub plaza):
+```python
+import hl2_blockout; hl2_blockout.create_neighborhoods_map(overwrite=True)
+```
+Or drag an `HL2NeighborhoodsBlockout` actor into any level that uses `HL2GameMode`.
+
+Layout (+Y north, hub at the origin, roughly 13,000 HU square):
+
+- **Central hub** - market square around a great camphor tree, well, stalls, notice board / workbench / robot dock
+  placeholders. Six pathways leave it: **Lantern Road** (N), **Tram Steps** (NE), **Rubble Row** (E), **Canal Walk**
+  (S), **Windmill Path** (SW), **Grove Path** (W).
+- **Roads** - Lantern Road, Maple Lane, Sparrow Close, Rubble Row and Quarry Lane; three T-junctions (Maple Lane,
+  Sparrow Close, Quarry Lane) and three cul-de-sacs (C1-C3) with tree islands.
+- **Districts** - dense north suburbs (shrine, water tower, allotments), Clocktower Hill with an overgrown tram,
+  rubble terraces with houses built on/into a ruined apartment block, a fallen tower block and quarry, the canal
+  quarter (promenade, warehouses, raised drawbridge, broken footbridge, waterwheel, lock tower), the grove with a
+  house grown around a giant tree, and windmill fields.
+- **Counts** - 30 houses plus terrace/row frontages, 7 hidden-room placeholders (H1-H7, crawl-height entrances),
+  4 blocker placeholders (B1 rubble, B2 brambles, B3 collapsed tunnel, B4 drawbridge), side paths, an ivy-curtain
+  secret path, ledges and bridges for ~10 distinct routes.
+
+Without noclip, the rubble terraces (behind B1) and the far canal bank (B4 / footbridge gap) are not reachable
+with the standard movement; everything else is.
+
+Edit layout in `Source/HL2Blockout/Private/HL2NeighborhoodsBlockout.cpp`.
+
 ## Layout
 
 ```
-Source/HL2Blockout/        game module (character, game mode, blockout actor)
+Source/HL2Blockout/        game module (character, game mode, blockout actors)
 Plugins/PBCharacterMovement/  vendored movement plugin (MIT, Project Borealis)
-Content/Python/            editor scripts that generate the PointInsertion map
+Content/Python/            editor scripts that generate the PointInsertion / Neighborhoods maps
 Config/                    default map, game mode, HL2 gravity, Enhanced Input
 ```
 

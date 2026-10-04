@@ -4,6 +4,7 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerStart.h"
 #include "HL2Character.h"
+#include "HL2BlockoutBase.h"
 #include "HL2PointInsertionBlockout.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(HL2GameMode)
@@ -26,7 +27,7 @@ AActor* AHL2GameMode::ChoosePlayerStart_Implementation(AController* Player)
 		return FallbackStart;
 	}
 
-	if (AHL2PointInsertionBlockout* Blockout = FindOrSpawnBlockout())
+	if (AHL2BlockoutBase* Blockout = FindOrSpawnBlockout())
 	{
 		FActorSpawnParameters Params;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -40,7 +41,7 @@ AActor* AHL2GameMode::ChoosePlayerStart_Implementation(AController* Player)
 	return Super::ChoosePlayerStart_Implementation(Player);
 }
 
-AHL2PointInsertionBlockout* AHL2GameMode::FindOrSpawnBlockout()
+AHL2BlockoutBase* AHL2GameMode::FindOrSpawnBlockout()
 {
 	UWorld* World = GetWorld();
 	if (!World)
@@ -48,7 +49,7 @@ AHL2PointInsertionBlockout* AHL2GameMode::FindOrSpawnBlockout()
 		return nullptr;
 	}
 
-	if (TActorIterator<AHL2PointInsertionBlockout> It(World); It)
+	if (TActorIterator<AHL2BlockoutBase> It(World); It)
 	{
 		return *It;
 	}

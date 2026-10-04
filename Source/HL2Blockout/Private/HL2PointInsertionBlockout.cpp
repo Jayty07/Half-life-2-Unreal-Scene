@@ -1,27 +1,18 @@
 #include "HL2PointInsertionBlockout.h"
 
-#include "Components/DirectionalLightComponent.h"
-#include "Components/ExponentialHeightFogComponent.h"
-#include "Components/InstancedStaticMeshComponent.h"
-#include "Components/SkyAtmosphereComponent.h"
-#include "Components/SkyLightComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/CollisionProfile.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "Materials/MaterialInterface.h"
-#include "UObject/ConstructorHelpers.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(HL2PointInsertionBlockout)
 
-namespace HL2Blockout
+namespace HL2PointInsertion
 {
 	/** Hammer unit -> Unreal centimetre (matches PBCharacterMovement's conversions). */
 	constexpr float HU = 1.905f;
-
-	constexpr int32 NumMaterials = static_cast<int32>(EHL2BlockoutMaterial::Count);
 
 	/** Arrival track centre line and the train car the player starts in. */
 	constexpr float ArrivalTrackY = -1850.0f;
@@ -29,47 +20,13 @@ namespace HL2Blockout
 	constexpr float StartCarX1 = 3912.0f;
 	constexpr float TrainFloorZ = 48.0f;
 
-	const TCHAR* MaterialNames[NumMaterials] = {
-		TEXT("Concrete"), TEXT("DarkConcrete"), TEXT("Tile"), TEXT("Brick"), TEXT("Metal"),
-		TEXT("Combine"), TEXT("Wood"), TEXT("Train"), TEXT("Screen"), TEXT("Trim"),
-	};
-
 	FORCEINLINE FVector ToCm(const FVector& V) { return V * HU; }
 }
 
-using namespace HL2Blockout;
+using namespace HL2PointInsertion;
 
 AHL2PointInsertionBlockout::AHL2PointInsertionBlockout()
 {
-	PrimaryActorTick.bCanEverTick = false;
-
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeFinder(TEXT("/Engine/BasicShapes/Cube.Cube"));
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderFinder(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MaterialFinder(TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	CubeMesh = CubeFinder.Object;
-	CylinderMesh = CylinderFinder.Object;
-	BaseMaterial = MaterialFinder.Object;
-
-	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
-	Root->SetMobility(EComponentMobility::Static);
-	RootComponent = Root;
-
-	auto MakeISM = [this](const FString& Name, UStaticMesh* Mesh)
-	{
-		UInstancedStaticMeshComponent* ISM = CreateDefaultSubobject<UInstancedStaticMeshComponent>(*Name);
-		ISM->SetupAttachment(Root);
-		ISM->SetMobility(EComponentMobility::Static);
-		ISM->SetStaticMesh(Mesh);
-		ISM->SetCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
-		return ISM;
-	};
-
-	for (int32 Index = 0; Index < NumMaterials; ++Index)
-	{
-		CubeInstances.Add(MakeISM(FString::Printf(TEXT("Boxes_%s"), MaterialNames[Index]), CubeMesh));
-		CylinderInstances.Add(MakeISM(FString::Printf(TEXT("Cylinders_%s"), MaterialNames[Index]), CylinderMesh));
-	}
-
 	// City 17 palette: desaturated concrete, rust brick, Combine blue-black.
 	Palette = {
 		FLinearColor(0.32f, 0.32f, 0.30f), // Concrete
@@ -82,41 +39,19 @@ AHL2PointInsertionBlockout::AHL2PointInsertionBlockout()
 		FLinearColor(0.12f, 0.22f, 0.19f), // Train
 		FLinearColor(0.08f, 0.30f, 0.45f), // Screen
 		FLinearColor(0.80f, 0.60f, 0.05f), // Trim
+		FLinearColor(0.45f, 0.42f, 0.36f), // Plaster
+		FLinearColor(0.50f, 0.38f, 0.28f), // PlasterWarm
+		FLinearColor(0.30f, 0.12f, 0.08f), // RoofRed
+		FLinearColor(0.12f, 0.24f, 0.25f), // RoofTeal
+		FLinearColor(0.15f, 0.22f, 0.10f), // Foliage
+		FLinearColor(0.07f, 0.12f, 0.06f), // FoliageDark
+		FLinearColor(0.18f, 0.24f, 0.12f), // Grass
+		FLinearColor(0.26f, 0.25f, 0.23f), // Rubble
+		FLinearColor(0.06f, 0.14f, 0.18f), // Water
+		FLinearColor(0.22f, 0.17f, 0.11f), // Dirt
+		FLinearColor(0.12f, 0.20f, 0.08f), // Vines
+		FLinearColor(0.90f, 0.10f, 0.70f), // Marker
 	};
-
-	Sun = CreateDefaultSubobject<UDirectionalLightComponent>(TEXT("Sun"));
-	Sun->SetupAttachment(Root);
-	Sun->SetMobility(EComponentMobility::Movable);
-	Sun->SetRelativeRotation(FRotator(-38.0f, 40.0f, 0.0f));
-	Sun->Intensity = 5.0f;
-	Sun->LightColor = FColor(235, 240, 255);
-	Sun->SetAtmosphereSunLight(true);
-
-	SkyLight = CreateDefaultSubobject<USkyLightComponent>(TEXT("SkyLight"));
-	SkyLight->SetupAttachment(Root);
-	SkyLight->SetMobility(EComponentMobility::Movable);
-	SkyLight->bRealTimeCapture = true;
-
-	SkyAtmosphere = CreateDefaultSubobject<USkyAtmosphereComponent>(TEXT("SkyAtmosphere"));
-	SkyAtmosphere->SetupAttachment(Root);
-
-	HeightFog = CreateDefaultSubobject<UExponentialHeightFogComponent>(TEXT("HeightFog"));
-	HeightFog->SetupAttachment(Root);
-	HeightFog->FogDensity = 0.03f;
-	HeightFog->FogHeightFalloff = 0.1f;
-}
-
-void AHL2PointInsertionBlockout::OnConstruction(const FTransform& Transform)
-{
-	Super::OnConstruction(Transform);
-	RebuildBlockout();
-}
-
-void AHL2PointInsertionBlockout::PostRegisterAllComponents()
-{
-	Super::PostRegisterAllComponents();
-	ApplyPalette();
-	ApplyLightingVisibility();
 }
 
 void AHL2PointInsertionBlockout::BeginPlay()
@@ -151,22 +86,8 @@ FTransform AHL2PointInsertionBlockout::GetPlayerStartTransform() const
 	return FTransform(FRotator(0.0f, -90.0f, 0.0f), Local) * GetActorTransform();
 }
 
-void AHL2PointInsertionBlockout::ClearInstances()
+void AHL2PointInsertionBlockout::BuildLayout()
 {
-	for (UInstancedStaticMeshComponent* ISM : CubeInstances)
-	{
-		if (ISM) { ISM->ClearInstances(); }
-	}
-	for (UInstancedStaticMeshComponent* ISM : CylinderInstances)
-	{
-		if (ISM) { ISM->ClearInstances(); }
-	}
-}
-
-void AHL2PointInsertionBlockout::RebuildBlockout()
-{
-	ClearInstances();
-
 	BuildWorldBounds();
 	BuildRailYard();
 	BuildArrivalPlatform();
@@ -179,197 +100,6 @@ void AHL2PointInsertionBlockout::RebuildBlockout()
 	BuildRooftops();
 	BuildAtticAndEnd();
 	BuildSkyline();
-
-	ApplyPalette();
-	ApplyLightingVisibility();
-}
-
-void AHL2PointInsertionBlockout::ApplyPalette()
-{
-	if (HasAnyFlags(RF_ClassDefaultObject) || !BaseMaterial)
-	{
-		return;
-	}
-
-	Palette.SetNum(NumMaterials);
-	PaletteMaterials.SetNum(NumMaterials);
-
-	for (int32 Index = 0; Index < NumMaterials; ++Index)
-	{
-		UMaterialInstanceDynamic* MID = PaletteMaterials[Index];
-		if (!MID)
-		{
-			MID = UMaterialInstanceDynamic::Create(BaseMaterial, this);
-			PaletteMaterials[Index] = MID;
-		}
-		MID->SetVectorParameterValue(TEXT("Color"), Palette[Index]);
-		MID->SetVectorParameterValue(TEXT("BaseColor"), Palette[Index]);
-
-		if (CubeInstances.IsValidIndex(Index) && CubeInstances[Index])
-		{
-			CubeInstances[Index]->SetMaterial(0, MID);
-		}
-		if (CylinderInstances.IsValidIndex(Index) && CylinderInstances[Index])
-		{
-			CylinderInstances[Index]->SetMaterial(0, MID);
-		}
-	}
-}
-
-void AHL2PointInsertionBlockout::ApplyLightingVisibility()
-{
-	for (USceneComponent* Component : TArray<USceneComponent*>{ Sun, SkyLight, SkyAtmosphere, HeightFog })
-	{
-		if (Component)
-		{
-			Component->SetVisibility(bIncludeSkyAndLighting);
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Geometry helpers (all inputs in Hammer units, local to the actor)
-// ---------------------------------------------------------------------------
-
-void AHL2PointInsertionBlockout::Box(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU)
-{
-	const FVector Size = MaxHU - MinHU;
-	if (Size.X <= UE_KINDA_SMALL_NUMBER || Size.Y <= UE_KINDA_SMALL_NUMBER || Size.Z <= UE_KINDA_SMALL_NUMBER)
-	{
-		return;
-	}
-
-	const int32 Index = static_cast<int32>(Mat);
-	if (!CubeInstances.IsValidIndex(Index) || !CubeInstances[Index])
-	{
-		return;
-	}
-
-	// Engine cube is 100 cm with a centred pivot.
-	CubeInstances[Index]->AddInstance(FTransform(FQuat::Identity, ToCm((MinHU + MaxHU) * 0.5f), ToCm(Size) / 100.0f));
-}
-
-void AHL2PointInsertionBlockout::Cylinder(EHL2BlockoutMaterial Mat, const FVector& BaseCenterHU, float RadiusHU, float HeightHU)
-{
-	const int32 Index = static_cast<int32>(Mat);
-	if (RadiusHU <= 0.0f || HeightHU <= 0.0f || !CylinderInstances.IsValidIndex(Index) || !CylinderInstances[Index])
-	{
-		return;
-	}
-
-	// Engine cylinder is 100 cm wide/tall with a centred pivot.
-	const FVector Center = BaseCenterHU + FVector(0.0f, 0.0f, HeightHU * 0.5f);
-	const FVector Scale = ToCm(FVector(RadiusHU * 2.0f, RadiusHU * 2.0f, HeightHU)) / 100.0f;
-	CylinderInstances[Index]->AddInstance(FTransform(FQuat::Identity, ToCm(Center), Scale));
-}
-
-void AHL2PointInsertionBlockout::WallWithOpenings(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU, int32 ThinAxis, const TArray<FBox2D>& Openings)
-{
-	// U runs along the wall horizontally, V is height.
-	const int32 UAxis = ThinAxis == 0 ? 1 : 0;
-	const double U0 = MinHU[UAxis];
-	const double U1 = MaxHU[UAxis];
-	const double V0 = MinHU.Z;
-	const double V1 = MaxHU.Z;
-
-	TArray<double> Cuts = { U0, U1 };
-	for (const FBox2D& Opening : Openings)
-	{
-		Cuts.Add(FMath::Clamp(Opening.Min.X, U0, U1));
-		Cuts.Add(FMath::Clamp(Opening.Max.X, U0, U1));
-	}
-	Cuts.Sort();
-
-	for (int32 CutIndex = 0; CutIndex + 1 < Cuts.Num(); ++CutIndex)
-	{
-		const double A = Cuts[CutIndex];
-		const double B = Cuts[CutIndex + 1];
-		if (B - A <= UE_KINDA_SMALL_NUMBER)
-		{
-			continue;
-		}
-		const double Mid = (A + B) * 0.5f;
-
-		// Height ranges removed from this strip.
-		TArray<FVector2D> Holes;
-		for (const FBox2D& Opening : Openings)
-		{
-			if (Mid > Opening.Min.X && Mid < Opening.Max.X)
-			{
-				Holes.Add(FVector2D(FMath::Max(Opening.Min.Y, V0), FMath::Min(Opening.Max.Y, V1)));
-			}
-		}
-		Holes.Sort([](const FVector2D& L, const FVector2D& R) { return L.X < R.X; });
-
-		double Cursor = V0;
-		auto Emit = [&](double Bottom, double Top)
-		{
-			if (Top - Bottom <= UE_KINDA_SMALL_NUMBER)
-			{
-				return;
-			}
-			FVector Min = MinHU;
-			FVector Max = MaxHU;
-			Min[UAxis] = A;
-			Max[UAxis] = B;
-			Min.Z = Bottom;
-			Max.Z = Top;
-			Box(Mat, Min, Max);
-		};
-
-		for (const FVector2D& Hole : Holes)
-		{
-			Emit(Cursor, Hole.X);
-			Cursor = FMath::Max(Cursor, Hole.Y);
-		}
-		Emit(Cursor, V1);
-	}
-}
-
-void AHL2PointInsertionBlockout::SlabWithHole(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU, const FBox2D& HoleXY)
-{
-	const double HX0 = FMath::Clamp(HoleXY.Min.X, MinHU.X, MaxHU.X);
-	const double HX1 = FMath::Clamp(HoleXY.Max.X, MinHU.X, MaxHU.X);
-	const double HY0 = FMath::Clamp(HoleXY.Min.Y, MinHU.Y, MaxHU.Y);
-	const double HY1 = FMath::Clamp(HoleXY.Max.Y, MinHU.Y, MaxHU.Y);
-
-	Box(Mat, MinHU, FVector(HX0, MaxHU.Y, MaxHU.Z));
-	Box(Mat, FVector(HX1, MinHU.Y, MinHU.Z), MaxHU);
-	Box(Mat, FVector(HX0, MinHU.Y, MinHU.Z), FVector(HX1, HY0, MaxHU.Z));
-	Box(Mat, FVector(HX0, HY1, MinHU.Z), FVector(HX1, MaxHU.Y, MaxHU.Z));
-}
-
-void AHL2PointInsertionBlockout::Stairs(EHL2BlockoutMaterial Mat, const FVector& StartHU, const FIntPoint& Direction, int32 NumSteps, float RiseHU, float RunHU, float WidthHU)
-{
-	for (int32 Step = 0; Step < NumSteps; ++Step)
-	{
-		const float Near = Step * RunHU;
-		const float Far = (Step + 1) * RunHU;
-		const float Top = StartHU.Z + (Step + 1) * RiseHU;
-
-		FVector Min = StartHU;
-		FVector Max = StartHU;
-		Max.Z = Top;
-
-		if (Direction.X != 0)
-		{
-			const float A = StartHU.X + Direction.X * Near;
-			const float B = StartHU.X + Direction.X * Far;
-			Min.X = FMath::Min(A, B);
-			Max.X = FMath::Max(A, B);
-			Max.Y = StartHU.Y + WidthHU;
-		}
-		else
-		{
-			const float A = StartHU.Y + Direction.Y * Near;
-			const float B = StartHU.Y + Direction.Y * Far;
-			Min.Y = FMath::Min(A, B);
-			Max.Y = FMath::Max(A, B);
-			Max.X = StartHU.X + WidthHU;
-		}
-
-		Box(Mat, Min, Max);
-	}
 }
 
 void AHL2PointInsertionBlockout::Track(float X0, float X1, float CenterY)
@@ -382,74 +112,6 @@ void AHL2PointInsertionBlockout::Track(float X0, float X1, float CenterY)
 	}
 	Box(M::Metal, FVector(X0, CenterY - 30.0f, 0.0f), FVector(X1, CenterY - 26.0f, 7.0f));
 	Box(M::Metal, FVector(X0, CenterY + 26.0f, 0.0f), FVector(X1, CenterY + 30.0f, 7.0f));
-}
-
-void AHL2PointInsertionBlockout::Vault(EHL2BlockoutMaterial Mat, float X0, float X1, float Y0, float Y1, float BaseZ, float RiseHU, int32 Segments, float ThicknessHU, int32 OpenTopSegments)
-{
-	const double CenterY = (Y0 + Y1) * 0.5;
-	const double Radius = (Y1 - Y0) * 0.5;
-	const int32 OpenBegin = (Segments - OpenTopSegments) / 2;
-	const int32 OpenEnd = OpenBegin + OpenTopSegments;
-
-	for (int32 Segment = 0; Segment < Segments; ++Segment)
-	{
-		if (OpenTopSegments > 0 && Segment >= OpenBegin && Segment < OpenEnd)
-		{
-			continue;
-		}
-
-		const double T0 = UE_DOUBLE_PI * Segment / Segments;
-		const double T1 = UE_DOUBLE_PI * (Segment + 1) / Segments;
-		const double YA = CenterY - Radius * FMath::Cos(T0);
-		const double YB = CenterY - Radius * FMath::Cos(T1);
-		const double ZA = BaseZ + RiseHU * FMath::Sin(T0);
-		const double ZB = BaseZ + RiseHU * FMath::Sin(T1);
-
-		Box(Mat,
-			FVector(X0, FMath::Min(YA, YB), FMath::Min(ZA, ZB)),
-			FVector(X1, FMath::Max(YA, YB), FMath::Max(ZA, ZB) + ThicknessHU));
-	}
-}
-
-void AHL2PointInsertionBlockout::GableRoof(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU, int32 RidgeAxis, int32 Steps)
-{
-	const int32 Across = RidgeAxis == 0 ? 1 : 0;
-	const double HalfSpan = (MaxHU[Across] - MinHU[Across]) * 0.5;
-	const double StepRise = (MaxHU.Z - MinHU.Z) / Steps;
-
-	for (int32 Step = 0; Step < Steps; ++Step)
-	{
-		const double Inset = HalfSpan * Step / Steps;
-		FVector Min = MinHU;
-		FVector Max = MaxHU;
-		Min[Across] += Inset;
-		Max[Across] -= Inset;
-		Min.Z = MinHU.Z + StepRise * Step;
-		Max.Z = Min.Z + StepRise;
-		Box(Mat, Min, Max);
-	}
-}
-
-void AHL2PointInsertionBlockout::FacadeWindows(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU, int32 ThinAxis, float SpacingHU, float FloorHeightHU, float WidthHU, float HeightHU)
-{
-	const int32 UAxis = ThinAxis == 0 ? 1 : 0;
-	const double Length = MaxHU[UAxis] - MinHU[UAxis];
-	const int32 Columns = FMath::Max(1, FMath::FloorToInt32(Length / SpacingHU));
-	const double Margin = (Length - Columns * SpacingHU) * 0.5 + (SpacingHU - WidthHU) * 0.5;
-
-	for (double FloorZ = MinHU.Z + FloorHeightHU * 0.35; FloorZ + HeightHU <= MaxHU.Z; FloorZ += FloorHeightHU)
-	{
-		for (int32 Column = 0; Column < Columns; ++Column)
-		{
-			FVector Min = MinHU;
-			FVector Max = MaxHU;
-			Min[UAxis] = MinHU[UAxis] + Margin + Column * SpacingHU;
-			Max[UAxis] = Min[UAxis] + WidthHU;
-			Min.Z = FloorZ;
-			Max.Z = FloorZ + HeightHU;
-			Box(Mat, Min, Max);
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
