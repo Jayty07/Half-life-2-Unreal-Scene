@@ -10,10 +10,13 @@
  * into the rubble of an old city, arranged around a central market hub.
  *
  * Six pathways leave the hub (Lantern Road, Tram Steps, Rubble Row, Canal
- * Walk, Windmill Path, Grove Path). The road network has six roads, three
- * T-junctions and three cul-de-sacs, ~30 solid (non-enterable) houses,
- * placeholder blockers, upgrade ledges and hidden rooms. Gameplay spots are
- * shown with the Marker palette entry only; no gameplay is implemented.
+ * Walk, Windmill Path, Grove Path). The road network has eleven roads, more
+ * than three T-junctions and three cul-de-sacs, 100+ solid (non-enterable)
+ * houses, placeholder blockers, upgrade ledges and hidden rooms. Every house
+ * gets its own colours, door, mailbox, rooftop ornament and yard feature so
+ * delivery addresses are recognisable. Open ground rises into terraced hills
+ * while roads, plots and the hub stay level. Gameplay spots are shown with
+ * the Marker palette entry only; no gameplay is implemented.
  *
  * Authored in Hammer units (1 HU = 1.905 cm) and rebuilt in OnConstruction.
  */
@@ -92,6 +95,42 @@ private:
 	/** World-space XY footprints of the generated houses (for overlap checks). */
 	TArray<FBox2D> HouseFootprints;
 
+	/** Roads, sidewalks, cul-de-sacs and dirt paths (kept clear of trees). */
+	TArray<FBox2D> PavedAreas;
+
+	struct FScatterJob
+	{
+		FVector2D Min;
+		FVector2D Max;
+		float Spacing;
+		float TreeChance;
+		TArray<FBox2D> Avoid;
+		uint32 Seed;
+		float BaseZ;
+	};
+
+	/** Vegetation is placed after the terrain so it sits on the hills. */
+	TArray<FScatterJob> ScatterJobs;
+
+	/** Terrain grid cells that must stay at ground level (anything built on the ground). */
+	TArray<uint8> FlatCells;
+	TArray<float> TerrainHeights;
+	int32 FlattenSuppression = 0;
+
+	// Hide the base primitive helpers so every ground-level primitive keeps the terrain flat under it.
+	void Box(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU);
+	void OrientedBox(EHL2BlockoutMaterial Mat, const FVector& CenterHU, const FVector& SizeHU, const FRotator& Rotation);
+	void Cylinder(EHL2BlockoutMaterial Mat, const FVector& BaseCenterHU, float RadiusHU, float HeightHU);
+	void WallWithOpenings(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU, int32 ThinAxis, const TArray<FBox2D>& Openings);
+	void Stairs(EHL2BlockoutMaterial Mat, const FVector& StartHU, const FIntPoint& Direction, int32 NumSteps, float RiseHU, float RunHU, float WidthHU);
+
+	void MarkFlat(const FVector& Min, const FVector& Max);
+	void MarkFlatXY(const FVector2D& Min, const FVector2D& Max);
+	/** Rolling terraced hills over the open ground (steps <= 16 HU, so always walkable). */
+	void BuildTerrain();
+	float TerrainHeightAt(const FVector2D& P) const;
+	void RunScatter(const FScatterJob& Job);
+
 	void BuildGround();
 	void BuildPerimeter();
 	void BuildHub();
@@ -111,6 +150,15 @@ private:
 	void LRoof(const FFrame& F, EHL2BlockoutMaterial Mat, const FVector& LocalMin, const FVector& LocalMax, bool bRidgeAlongX, int32 Steps);
 
 	void House(const FHouse& Spec);
+	/** XY footprint of a house's walls (and with bWithYard, its back lean-to); Id is its index in the build order. */
+	FBox2D HouseFootprint(const FHouse& Spec, int32 Id, bool bWithYard) const;
+	/**
+	 * Street of houses: fronts at FirstFront + Step * i, all facing Facing. Each house cycles
+	 * wall, roof and silhouette so neighbours never match. Plots that would overlap an existing
+	 * house, a paved area or an Avoid box are skipped.
+	 */
+	void HouseRow(const FVector2D& FirstFront, const FVector2D& Step, int32 Count, int32 Facing, float MaxDepth,
+		uint32 ExtraFeatures, uint32 Seed, const TArray<FBox2D>& Avoid = TArray<FBox2D>());
 	/** Narrow terraced building used for the hub's market frontage. */
 	void TownBlock(const FFrame& F, float X0, float X1, uint32 Seed, bool bWorkshop);
 	/** Row of TownBlocks along local X from X0 to X1, leaving the openings (local X ranges) clear. */
@@ -128,7 +176,7 @@ private:
 	void Shrub(const FVector& Base, float Size, uint32 Seed);
 	void RubblePile(const FVector& Center, float Radius, float Height, uint32 Seed);
 	void Lantern(const FVector& Base);
-	/** Jittered trees, shrubs and grass tufts over a rectangle, skipping Avoid boxes and houses. */
+	/** Jittered trees, shrubs and grass tufts over a rectangle, skipping Avoid boxes, houses and paved areas. Deferred until the terrain exists. */
 	void Scatter(const FVector2D& Min, const FVector2D& Max, float Spacing, float TreeChance, const TArray<FBox2D>& Avoid, uint32 Seed, float BaseZ = 0.0f);
 
 	/** Small enclosed room with a crouch-only (44 HU) entrance. Side: 0 = -X, 1 = +X, 2 = -Y, 3 = +Y. */

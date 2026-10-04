@@ -31,6 +31,18 @@ AHL2NeighborhoodsBlockout::AHL2NeighborhoodsBlockout()
 		FLinearColor(0.46f, 0.35f, 0.22f), // Dirt
 		FLinearColor(0.22f, 0.44f, 0.13f), // Vines
 		FLinearColor(0.95f, 0.10f, 0.75f), // Marker
+		FLinearColor(0.55f, 0.68f, 0.82f), // PlasterBlue
+		FLinearColor(0.86f, 0.60f, 0.62f), // PlasterRose
+		FLinearColor(0.62f, 0.72f, 0.55f), // PlasterSage
+		FLinearColor(0.85f, 0.70f, 0.30f), // PlasterOchre
+		FLinearColor(0.28f, 0.20f, 0.15f), // TimberDark
+		FLinearColor(0.26f, 0.28f, 0.36f), // RoofSlate
+		FLinearColor(0.76f, 0.48f, 0.16f), // RoofOchre
+		FLinearColor(0.30f, 0.40f, 0.18f), // RoofMoss
+		FLinearColor(0.78f, 0.12f, 0.10f), // PaintRed
+		FLinearColor(0.12f, 0.30f, 0.72f), // PaintBlue
+		FLinearColor(0.95f, 0.80f, 0.12f), // PaintYellow
+		FLinearColor(0.10f, 0.52f, 0.28f), // PaintGreen
 	};
 
 	Sun->SetRelativeRotation(FRotator(-32.0f, 135.0f, 0.0f));
@@ -117,6 +129,59 @@ namespace HL2Neighborhoods
 	constexpr float CanalY1 = -4600.0f;
 	constexpr float CanalBedZ = -160.0f;
 	constexpr float GroundBottomZ = -192.0f;
+
+	/** Terrain grid over the walkable square inside the perimeter. */
+	constexpr float TerrainCell = 64.0f;
+	constexpr int32 TerrainCells = static_cast<int32>(2.0f * MapHalf / TerrainCell);
+	constexpr float TerrainPeak = 176.0f;
+	constexpr float TerrainTerrace = 8.0f;
+	/** Largest height change between neighbouring cells; below the 18 HU step height. */
+	constexpr float TerrainMaxRise = 16.0f;
+	/** Cells of level ground kept around anything built on the ground. */
+	constexpr int32 TerrainFlatMargin = 1;
+	/** Primitives starting above this are not on the ground and do not flatten it. */
+	constexpr float TerrainFlatMaxZ = 40.0f;
+
+	inline float LatticeValue(int32 X, int32 Y, uint32 Seed)
+	{
+		uint32 H = static_cast<uint32>(X) * 73856093u ^ static_cast<uint32>(Y) * 19349663u ^ Seed * 83492791u;
+		H ^= H >> 13;
+		H *= 0x5bd1e995u;
+		H ^= H >> 15;
+		return static_cast<float>(H & 0xFFFFFFu) / 16777216.0f;
+	}
+
+	/** Smooth value noise in [0, 1]. */
+	inline float ValueNoise(float X, float Y, float Wavelength, uint32 Seed)
+	{
+		const float FX = X / Wavelength;
+		const float FY = Y / Wavelength;
+		const int32 IX = FMath::FloorToInt32(FX);
+		const int32 IY = FMath::FloorToInt32(FY);
+		auto Smooth = [](float T) { return T * T * (3.0f - 2.0f * T); };
+		const float TX = Smooth(FX - IX);
+		const float TY = Smooth(FY - IY);
+		const float A = LatticeValue(IX, IY, Seed) + (LatticeValue(IX + 1, IY, Seed) - LatticeValue(IX, IY, Seed)) * TX;
+		const float B = LatticeValue(IX, IY + 1, Seed) + (LatticeValue(IX + 1, IY + 1, Seed) - LatticeValue(IX, IY + 1, Seed)) * TX;
+		return A + (B - A) * TY;
+	}
+
+	inline FBox2D Expand(const FBox2D& B, float By)
+	{
+		return FBox2D(B.Min - FVector2D(By, By), B.Max + FVector2D(By, By));
+	}
+
+	inline bool OverlapsAny(const FBox2D& A, const TArray<FBox2D>& Boxes, float Margin)
+	{
+		for (const FBox2D& B : Boxes)
+		{
+			if (A.Min.X < B.Max.X + Margin && A.Max.X > B.Min.X - Margin && A.Min.Y < B.Max.Y + Margin && A.Max.Y > B.Min.Y - Margin)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 }
 
 using namespace HL2Neighborhoods;
@@ -127,6 +192,11 @@ void AHL2NeighborhoodsBlockout::BuildLayout()
 	HiddenRoomCount = 0;
 	BlockerCount = 0;
 	HouseFootprints.Reset();
+	PavedAreas.Reset();
+	ScatterJobs.Reset();
+	TerrainHeights.Reset();
+	FlatCells.Init(0, TerrainCells * TerrainCells);
+	FlattenSuppression = 0;
 
 	BuildGround();
 	BuildPerimeter();
@@ -139,6 +209,13 @@ void AHL2NeighborhoodsBlockout::BuildLayout()
 	BuildGrove();
 	BuildWindmillFields();
 	BuildSkyline();
+
+	BuildTerrain();
+	for (const FScatterJob& Job : ScatterJobs)
+	{
+		RunScatter(Job);
+	}
+	ScatterJobs.Reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +264,154 @@ void AHL2NeighborhoodsBlockout::LRoof(const FFrame& F, EHL2BlockoutMaterial Mat,
 }
 
 // ---------------------------------------------------------------------------
+// Ground-aware primitives and terrain
+// ---------------------------------------------------------------------------
+
+void AHL2NeighborhoodsBlockout::Box(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU)
+{
+	MarkFlat(MinHU, MaxHU);
+	AHL2BlockoutBase::Box(Mat, MinHU, MaxHU);
+}
+
+void AHL2NeighborhoodsBlockout::OrientedBox(EHL2BlockoutMaterial Mat, const FVector& CenterHU, const FVector& SizeHU, const FRotator& Rotation)
+{
+	// Bounding sphere: conservative for any rotation.
+	const float Radius = 0.5f * FMath::Sqrt(SizeHU.X * SizeHU.X + SizeHU.Y * SizeHU.Y + SizeHU.Z * SizeHU.Z);
+	MarkFlat(CenterHU - FVector(Radius, Radius, Radius), CenterHU + FVector(Radius, Radius, Radius));
+	AHL2BlockoutBase::OrientedBox(Mat, CenterHU, SizeHU, Rotation);
+}
+
+void AHL2NeighborhoodsBlockout::Cylinder(EHL2BlockoutMaterial Mat, const FVector& BaseCenterHU, float RadiusHU, float HeightHU)
+{
+	MarkFlat(BaseCenterHU - FVector(RadiusHU, RadiusHU, 0.0f), BaseCenterHU + FVector(RadiusHU, RadiusHU, HeightHU));
+	AHL2BlockoutBase::Cylinder(Mat, BaseCenterHU, RadiusHU, HeightHU);
+}
+
+void AHL2NeighborhoodsBlockout::WallWithOpenings(EHL2BlockoutMaterial Mat, const FVector& MinHU, const FVector& MaxHU, int32 ThinAxis, const TArray<FBox2D>& Openings)
+{
+	MarkFlat(MinHU, MaxHU);
+	AHL2BlockoutBase::WallWithOpenings(Mat, MinHU, MaxHU, ThinAxis, Openings);
+}
+
+void AHL2NeighborhoodsBlockout::Stairs(EHL2BlockoutMaterial Mat, const FVector& StartHU, const FIntPoint& Direction, int32 NumSteps, float RiseHU, float RunHU, float WidthHU)
+{
+	const float Length = NumSteps * RunHU;
+	const FVector End = StartHU + FVector(Direction.X * Length + (Direction.X != 0 ? 0.0f : WidthHU), Direction.Y * Length + (Direction.X != 0 ? WidthHU : 0.0f), NumSteps * RiseHU);
+	MarkFlat(FVector(FMath::Min(StartHU.X, End.X), FMath::Min(StartHU.Y, End.Y), StartHU.Z), FVector(FMath::Max(StartHU.X, End.X), FMath::Max(StartHU.Y, End.Y), End.Z));
+	AHL2BlockoutBase::Stairs(Mat, StartHU, Direction, NumSteps, RiseHU, RunHU, WidthHU);
+}
+
+void AHL2NeighborhoodsBlockout::MarkFlat(const FVector& Min, const FVector& Max)
+{
+	if (FlattenSuppression > 0 || Min.Z > TerrainFlatMaxZ || Max.Z <= 0.25f)
+	{
+		return;
+	}
+	MarkFlatXY(FVector2D(Min.X, Min.Y), FVector2D(Max.X, Max.Y));
+}
+
+void AHL2NeighborhoodsBlockout::MarkFlatXY(const FVector2D& Min, const FVector2D& Max)
+{
+	if (FlatCells.Num() != TerrainCells * TerrainCells || Max.X < -MapHalf || Max.Y < -MapHalf || Min.X > MapHalf || Min.Y > MapHalf)
+	{
+		return;
+	}
+	const int32 X0 = FMath::Clamp(FMath::FloorToInt32((Min.X + MapHalf) / TerrainCell) - TerrainFlatMargin, 0, TerrainCells - 1);
+	const int32 X1 = FMath::Clamp(FMath::FloorToInt32((Max.X + MapHalf) / TerrainCell) + TerrainFlatMargin, 0, TerrainCells - 1);
+	const int32 Y0 = FMath::Clamp(FMath::FloorToInt32((Min.Y + MapHalf) / TerrainCell) - TerrainFlatMargin, 0, TerrainCells - 1);
+	const int32 Y1 = FMath::Clamp(FMath::FloorToInt32((Max.Y + MapHalf) / TerrainCell) + TerrainFlatMargin, 0, TerrainCells - 1);
+	for (int32 Y = Y0; Y <= Y1; ++Y)
+	{
+		for (int32 X = X0; X <= X1; ++X)
+		{
+			FlatCells[Y * TerrainCells + X] = 1;
+		}
+	}
+}
+
+void AHL2NeighborhoodsBlockout::BuildTerrain()
+{
+	using M = EHL2BlockoutMaterial;
+	constexpr int32 N = TerrainCells;
+	TerrainHeights.Init(0.0f, N * N);
+
+	// Two octaves of value noise; only the upper part of the range rises, giving separate hills.
+	for (int32 Y = 0; Y < N; ++Y)
+	{
+		for (int32 X = 0; X < N; ++X)
+		{
+			if (FlatCells[Y * N + X])
+			{
+				continue;
+			}
+			const float WX = -MapHalf + (X + 0.5f) * TerrainCell;
+			const float WY = -MapHalf + (Y + 0.5f) * TerrainCell;
+			const float Noise = 0.62f * ValueNoise(WX, WY, 1500.0f, 7u) + 0.38f * ValueNoise(WX, WY, 640.0f, 19u);
+			const float Height = TerrainPeak * FMath::Clamp((Noise - 0.34f) / 0.45f, 0.0f, 1.0f);
+			TerrainHeights[Y * N + X] = FMath::FloorToInt32(Height / TerrainTerrace) * TerrainTerrace;
+		}
+	}
+
+	// Limit the rise between neighbouring cells (two-pass chamfer), so hills slope down to the flat ground.
+	auto Relax = [&](int32 X, int32 Y, int32 NX, int32 NY)
+	{
+		if (NX >= 0 && NY >= 0 && NX < N && NY < N)
+		{
+			float& H = TerrainHeights[Y * N + X];
+			H = FMath::Min(H, TerrainHeights[NY * N + NX] + TerrainMaxRise);
+		}
+	};
+	for (int32 Y = 0; Y < N; ++Y)
+	{
+		for (int32 X = 0; X < N; ++X)
+		{
+			Relax(X, Y, X - 1, Y);
+			Relax(X, Y, X, Y - 1);
+		}
+	}
+	for (int32 Y = N - 1; Y >= 0; --Y)
+	{
+		for (int32 X = N - 1; X >= 0; --X)
+		{
+			Relax(X, Y, X + 1, Y);
+			Relax(X, Y, X, Y + 1);
+		}
+	}
+
+	// One box per run of equal height along each row.
+	for (int32 Y = 0; Y < N; ++Y)
+	{
+		int32 X = 0;
+		while (X < N)
+		{
+			const float H = TerrainHeights[Y * N + X];
+			int32 End = X + 1;
+			while (End < N && TerrainHeights[Y * N + End] == H)
+			{
+				++End;
+			}
+			if (H > 0.0f)
+			{
+				AHL2BlockoutBase::Box(M::Grass, FVector(-MapHalf + X * TerrainCell, -MapHalf + Y * TerrainCell, -8.0f),
+					FVector(-MapHalf + End * TerrainCell, -MapHalf + (Y + 1) * TerrainCell, H));
+			}
+			X = End;
+		}
+	}
+}
+
+float AHL2NeighborhoodsBlockout::TerrainHeightAt(const FVector2D& P) const
+{
+	const int32 X = FMath::FloorToInt32((P.X + MapHalf) / TerrainCell);
+	const int32 Y = FMath::FloorToInt32((P.Y + MapHalf) / TerrainCell);
+	if (TerrainHeights.Num() != TerrainCells * TerrainCells || X < 0 || Y < 0 || X >= TerrainCells || Y >= TerrainCells)
+	{
+		return 0.0f;
+	}
+	return TerrainHeights[Y * TerrainCells + X];
+}
+
+// ---------------------------------------------------------------------------
 // Props and dressing
 // ---------------------------------------------------------------------------
 
@@ -194,6 +419,7 @@ void AHL2NeighborhoodsBlockout::Tree(const FVector& Base, float Scale, uint32 Se
 {
 	using M = EHL2BlockoutMaterial;
 	FRand R(Seed);
+	++FlattenSuppression;
 
 	const float TrunkH = 190.0f * Scale;
 	Cylinder(M::Wood, Base, 9.0f * Scale, TrunkH);
@@ -219,17 +445,20 @@ void AHL2NeighborhoodsBlockout::Tree(const FVector& Base, float Scale, uint32 Se
 		Cylinder(R.Chance(0.6f) ? M::Foliage : M::FoliageDark, C, Radius, R.Range(45.0f, 75.0f) * Scale);
 	}
 	Cylinder(M::Foliage, Base + FVector(0.0f, 0.0f, TrunkH + 40.0f * Scale), 40.0f * Scale, 35.0f * Scale);
+	--FlattenSuppression;
 }
 
 void AHL2NeighborhoodsBlockout::Shrub(const FVector& Base, float Size, uint32 Seed)
 {
 	using M = EHL2BlockoutMaterial;
 	FRand R(Seed);
+	++FlattenSuppression;
 	Cylinder(R.Chance(0.5f) ? M::Foliage : M::FoliageDark, Base, Size * 0.5f, Size * R.Range(0.45f, 0.8f));
 	if (R.Chance(0.6f))
 	{
 		Cylinder(M::Foliage, Base + FVector(R.Range(-0.3f, 0.3f) * Size, R.Range(-0.3f, 0.3f) * Size, 0.0f), Size * 0.32f, Size * R.Range(0.6f, 1.0f));
 	}
+	--FlattenSuppression;
 }
 
 void AHL2NeighborhoodsBlockout::RubblePile(const FVector& Center, float Radius, float Height, uint32 Seed)
@@ -351,6 +580,9 @@ void AHL2NeighborhoodsBlockout::Road(bool bAlongX, float Center, float From, flo
 	};
 
 	Emit(Surface, From, To, Center - RoadHalf, Center + RoadHalf, 0.0f, 2.0f);
+	const float Outer = RoadHalf + WalkWidth;
+	PavedAreas.Add(bAlongX ? FBox2D(FVector2D(From, Center - Outer), FVector2D(To, Center + Outer))
+		: FBox2D(FVector2D(Center - Outer, From), FVector2D(Center + Outer, To)));
 
 	if (Surface == M::DarkConcrete)
 	{
@@ -392,6 +624,7 @@ void AHL2NeighborhoodsBlockout::CulDeSac(const FVector2D& Center, float Radius, 
 	using M = EHL2BlockoutMaterial;
 
 	Cylinder(M::DarkConcrete, FVector(Center.X, Center.Y, 0.0f), Radius, 2.5f);
+	PavedAreas.Add(FBox2D(Center - FVector2D(Radius + WalkWidth, Radius + WalkWidth), Center + FVector2D(Radius + WalkWidth, Radius + WalkWidth)));
 
 	// Kerb ring, open where the road comes in.
 	constexpr int32 Segments = 32;
@@ -421,6 +654,7 @@ void AHL2NeighborhoodsBlockout::CulDeSac(const FVector2D& Center, float Radius, 
 void AHL2NeighborhoodsBlockout::DirtPath(const FVector2D& Min, const FVector2D& Max)
 {
 	Box(EHL2BlockoutMaterial::Dirt, FVector(Min.X, Min.Y, 0.0f), FVector(Max.X, Max.Y, 1.5f));
+	PavedAreas.Add(FBox2D(Min, Max));
 }
 
 void AHL2NeighborhoodsBlockout::Ridge(const FVector2D& Min, const FVector2D& Max, float Height, int32 Style)
@@ -488,13 +722,17 @@ void AHL2NeighborhoodsBlockout::House(const FHouse& H)
 	const float D = H.Depth;
 	const float HalfW = W * 0.5f;
 
-	// Footprint record (walls + jetties).
-	{
-		const FVector A = F.ToWorld(FVector(-HalfW, -8.0f, 0.0f));
-		const FVector B = F.ToWorld(FVector(HalfW, D + 8.0f, 0.0f));
-		HouseFootprints.Add(FBox2D(FVector2D(FMath::Min(A.X, B.X), FMath::Min(A.Y, B.Y)), FVector2D(FMath::Max(A.X, B.X), FMath::Max(A.Y, B.Y))));
-		++HouseCount;
-	}
+	// Address identity, cycled by build order so neighbours never share it.
+	const int32 Id = HouseCount;
+	const M Paints[] = { M::PaintRed, M::PaintBlue, M::PaintYellow, M::PaintGreen };
+	const M DoorPaint = Paints[Id % 4];
+	const M ShutterPaint = Paints[(Id * 3 + 1) % 4];
+	const M FlagPaint = Paints[(Id + 2) % 4];
+	const int32 Ornament = (Id * 5) % 8;
+	const int32 YardFeature = (Id * 7 + 2) % 6;
+
+	HouseFootprints.Add(HouseFootprint(H, Id, false));
+	++HouseCount;
 
 	// Plinth (stone, or a rubble mound for houses built into the ruins).
 	if (H.Features & HF_Rubble)
@@ -529,8 +767,8 @@ void AHL2NeighborhoodsBlockout::House(const FHouse& H)
 			const float Y = -Jetty;
 			LBox(F, M::Screen, FVector(X - 16.0f, Y - 2.0f, Z + 40.0f), FVector(X + 16.0f, Y, Z + 86.0f));
 			LBox(F, M::Trim, FVector(X - 19.0f, Y - 3.0f, Z + 37.0f), FVector(X + 19.0f, Y, Z + 40.0f));
-			LBox(F, M::Wood, FVector(X - 28.0f, Y - 3.0f, Z + 40.0f), FVector(X - 18.0f, Y, Z + 86.0f));
-			LBox(F, M::Wood, FVector(X + 18.0f, Y - 3.0f, Z + 40.0f), FVector(X + 28.0f, Y, Z + 86.0f));
+			LBox(F, ShutterPaint, FVector(X - 28.0f, Y - 3.0f, Z + 40.0f), FVector(X - 18.0f, Y, Z + 86.0f));
+			LBox(F, ShutterPaint, FVector(X + 18.0f, Y - 3.0f, Z + 40.0f), FVector(X + 28.0f, Y, Z + 86.0f));
 			if (R.Chance(0.4f))
 			{
 				LBox(F, M::Wood, FVector(X - 20.0f, Y - 10.0f, Z + 30.0f), FVector(X + 20.0f, Y, Z + 37.0f));
@@ -560,7 +798,7 @@ void AHL2NeighborhoodsBlockout::House(const FHouse& H)
 	const float TopJetty = Jetty;
 
 	// Door (solid, decorative), step and a little tilted awning.
-	LBox(F, M::Wood, FVector(DoorX - 20.0f, -3.0f, PlinthHeight), FVector(DoorX + 20.0f, 0.0f, PlinthHeight + 84.0f));
+	LBox(F, DoorPaint, FVector(DoorX - 20.0f, -3.0f, PlinthHeight), FVector(DoorX + 20.0f, 0.0f, PlinthHeight + 84.0f));
 	LBox(F, M::Trim, FVector(DoorX + 12.0f, -5.0f, PlinthHeight + 40.0f), FVector(DoorX + 16.0f, -3.0f, PlinthHeight + 44.0f));
 	LBox(F, M::Concrete, FVector(DoorX - 28.0f, -18.0f, 0.0f), FVector(DoorX + 28.0f, -6.0f, 8.0f));
 	LOriented(F, H.Roof, FVector(DoorX, -14.0f, PlinthHeight + 98.0f), FVector(70.0f, 30.0f, 4.0f), FRotator(0.0f, 0.0f, -18.0f));
@@ -686,7 +924,190 @@ void AHL2NeighborhoodsBlockout::House(const FHouse& H)
 	}
 	Shrub(F.ToWorld(FVector(-HalfW - 16.0f, -12.0f, 0.0f)), R.Range(36.0f, 56.0f), H.Seed + 11u);
 	Shrub(F.ToWorld(FVector(HalfW + 16.0f, -12.0f, 0.0f)), R.Range(30.0f, 50.0f), H.Seed + 13u);
-	Tree(F.ToWorld(FVector(R.Range(-HalfW, HalfW), D + R.Range(80.0f, 140.0f), 0.0f)), R.Range(0.9f, 1.4f), H.Seed + 17u);
+	const float TreeX = R.Range(-HalfW, HalfW);
+	const float TreeY = D + (YardFeature == 3 ? 90.0f : 0.0f) + R.Range(80.0f, 140.0f);
+	const float TreeScale = R.Range(0.9f, 1.4f);
+	const FVector TreeBase = F.ToWorld(FVector(TreeX, TreeY, 0.0f));
+	if (!InsideAny(FVector2D(TreeBase.X, TreeBase.Y), PavedAreas))
+	{
+		Tree(TreeBase, TreeScale, H.Seed + 17u);
+	}
+
+	// Mailbox by the gate, painted to match the door, with a flag.
+	{
+		const float MX = DoorX >= 0.0f ? DoorX + 52.0f : DoorX - 52.0f;
+		LBox(F, M::Wood, FVector(MX - 2.0f, -28.0f, 0.0f), FVector(MX + 2.0f, -24.0f, 44.0f));
+		LBox(F, DoorPaint, FVector(MX - 8.0f, -32.0f, 44.0f), FVector(MX + 8.0f, -18.0f, 58.0f));
+		LBox(F, DoorPaint == M::PaintRed ? M::PaintYellow : M::PaintRed, FVector(MX + 8.0f, -27.0f, 50.0f), FVector(MX + 10.0f, -25.0f, 68.0f));
+	}
+
+	// Yard feature.
+	const bool bTower = (H.Features & HF_Tower) != 0;
+	switch (YardFeature)
+	{
+	case 1:
+		if (!bTower)
+		{
+			// Bay window on the side away from the mailbox.
+			const float BX = DoorX >= 0.0f ? -HalfW * 0.5f : HalfW * 0.5f;
+			LBox(F, H.Wall, FVector(BX - 40.0f, -18.0f, PlinthHeight), FVector(BX + 40.0f, 0.0f, PlinthHeight + 96.0f));
+			LBox(F, M::Screen, FVector(BX - 30.0f, -20.0f, PlinthHeight + 36.0f), FVector(BX + 30.0f, -18.0f, PlinthHeight + 84.0f));
+			LBox(F, H.Roof, FVector(BX - 46.0f, -24.0f, PlinthHeight + 96.0f), FVector(BX + 46.0f, 2.0f, PlinthHeight + 104.0f));
+		}
+		break;
+	case 2:
+		if (!bTower)
+		{
+			// Front porch with posts, a roof and a bench.
+			for (int32 Side = -1; Side <= 1; Side += 2)
+			{
+				LBox(F, M::Wood, FVector(DoorX + Side * 40.0f - 2.0f, -28.0f, 0.0f), FVector(DoorX + Side * 40.0f + 2.0f, -24.0f, PlinthHeight + 106.0f));
+			}
+			LOriented(F, H.Roof, FVector(DoorX, -14.0f, PlinthHeight + 110.0f), FVector(100.0f, 36.0f, 4.0f), FRotator(0.0f, 0.0f, -12.0f));
+			LBox(F, M::Wood, FVector(DoorX - 38.0f, -24.0f, 0.0f), FVector(DoorX - 24.0f, -12.0f, 16.0f));
+		}
+		break;
+	case 3:
+	{
+		// Lean-to shed against the back wall.
+		const float X0 = -HalfW + 20.0f;
+		const float X1 = X0 + W * 0.45f;
+		LBox(F, M::TimberDark, FVector(X0, D, 0.0f), FVector(X1, D + 70.0f, 96.0f));
+		LBox(F, DoorPaint, FVector(X0 + 12.0f, D + 70.0f, 0.0f), FVector(X0 + 44.0f, D + 72.0f, 72.0f));
+		LOriented(F, H.Roof, FVector((X0 + X1) * 0.5f, D + 36.0f, 112.0f), FVector(X1 - X0 + 16.0f, 86.0f, 4.0f), FRotator(-20.0f, 90.0f, 0.0f));
+		break;
+	}
+	case 4:
+		if ((H.Features & HF_Rubble) == 0)
+		{
+			// Rain barrels and a woodpile down one side.
+			const float SX = DoorX >= 0.0f ? -HalfW - 18.0f : HalfW + 18.0f;
+			LCylinder(F, M::Wood, FVector(SX, D * 0.55f, 0.0f), 10.0f, 30.0f);
+			LCylinder(F, ShutterPaint, FVector(SX, D * 0.55f + 24.0f, 0.0f), 10.0f, 26.0f);
+			LBox(F, M::TimberDark, FVector(SX - 9.0f, D * 0.75f, 0.0f), FVector(SX + 9.0f, D * 0.95f, 24.0f));
+		}
+		break;
+	case 5:
+		// Rose arch over the gate.
+		for (int32 Side = -1; Side <= 1; Side += 2)
+		{
+			LBox(F, M::Trim, FVector(DoorX + Side * 33.0f - 3.0f, -38.0f, 0.0f), FVector(DoorX + Side * 33.0f + 3.0f, -30.0f, 92.0f));
+		}
+		LBox(F, M::Trim, FVector(DoorX - 38.0f, -38.0f, 92.0f), FVector(DoorX + 38.0f, -30.0f, 98.0f));
+		LBox(F, M::Foliage, FVector(DoorX - 40.0f, -40.0f, 96.0f), FVector(DoorX + 40.0f, -28.0f, 108.0f));
+		LBox(F, FlagPaint, FVector(DoorX - 30.0f, -41.0f, 100.0f), FVector(DoorX - 22.0f, -39.0f, 106.0f));
+		LBox(F, FlagPaint, FVector(DoorX + 14.0f, -41.0f, 98.0f), FVector(DoorX + 22.0f, -39.0f, 104.0f));
+		break;
+	default:
+		break;
+	}
+
+	// Rooftop ornament on the ridge, readable from a distance.
+	{
+		const float OX = bRidgeX ? ((H.Features & HF_Stacked) ? HalfW * 0.4f : -HalfW * 0.35f) : 0.0f;
+		const float OY = bRidgeX ? D * 0.5f : D * 0.6f;
+		const FVector O(OX, OY, EaveZ + RoofH - 4.0f);
+		switch (Ornament)
+		{
+		case 0: // Weathervane cockerel.
+			LBox(F, M::Metal, O + FVector(-1.5f, -1.5f, 0.0f), O + FVector(1.5f, 1.5f, 70.0f));
+			LBox(F, M::Metal, O + FVector(-22.0f, -1.0f, 50.0f), O + FVector(22.0f, 1.0f, 52.0f));
+			LBox(F, M::PaintRed, O + FVector(-8.0f, -2.0f, 70.0f), O + FVector(8.0f, 2.0f, 84.0f));
+			break;
+		case 1: // Pennant.
+			LBox(F, M::Wood, O + FVector(-1.5f, -1.5f, 0.0f), O + FVector(1.5f, 1.5f, 110.0f));
+			LBox(F, FlagPaint, O + FVector(1.5f, -1.0f, 80.0f), O + FVector(50.0f, 1.0f, 108.0f));
+			break;
+		case 2: // Bell cupola.
+			for (int32 Post = 0; Post < 4; ++Post)
+			{
+				const FVector P = O + FVector((Post & 1) ? 16.0f : -16.0f, (Post & 2) ? 16.0f : -16.0f, 0.0f);
+				LBox(F, M::Wood, P - FVector(2.0f, 2.0f, 0.0f), P + FVector(2.0f, 2.0f, 44.0f));
+			}
+			LCylinder(F, M::Metal, O + FVector(0.0f, 0.0f, 18.0f), 9.0f, 18.0f);
+			LCylinder(F, H.Roof, O + FVector(0.0f, 0.0f, 44.0f), 26.0f, 8.0f);
+			LCylinder(F, H.Roof, O + FVector(0.0f, 0.0f, 52.0f), 16.0f, 10.0f);
+			LCylinder(F, H.Roof, O + FVector(0.0f, 0.0f, 62.0f), 6.0f, 12.0f);
+			break;
+		case 3: // Pinwheel.
+			LBox(F, M::Wood, O + FVector(-1.5f, -1.5f, 0.0f), O + FVector(1.5f, 1.5f, 80.0f));
+			for (int32 Blade = 0; Blade < 4; ++Blade)
+			{
+				LOriented(F, Blade & 1 ? FlagPaint : ShutterPaint, O + FVector(0.0f, -4.0f, 80.0f), FVector(60.0f, 2.0f, 10.0f), FRotator(Blade * 45.0f, 0.0f, 0.0f));
+			}
+			break;
+		case 4: // Lantern finial.
+			LBox(F, M::Wood, O + FVector(-2.0f, -2.0f, 0.0f), O + FVector(2.0f, 2.0f, 40.0f));
+			LBox(F, M::Screen, O + FVector(-9.0f, -9.0f, 40.0f), O + FVector(9.0f, 9.0f, 64.0f));
+			LBox(F, M::RoofRed, O + FVector(-13.0f, -13.0f, 64.0f), O + FVector(13.0f, 13.0f, 70.0f));
+			break;
+		case 5: // Birdhouse on a tall pole.
+			LBox(F, M::Wood, O + FVector(-1.5f, -1.5f, 0.0f), O + FVector(1.5f, 1.5f, 120.0f));
+			LBox(F, FlagPaint, O + FVector(-10.0f, -10.0f, 120.0f), O + FVector(10.0f, 10.0f, 140.0f));
+			LRoof(F, H.Roof, O + FVector(-14.0f, -14.0f, 140.0f), O + FVector(14.0f, 14.0f, 154.0f), true, 3);
+			break;
+		case 6: // Little observatory dome.
+			LCylinder(F, M::Metal, O, 30.0f, 22.0f);
+			LCylinder(F, M::Trim, O + FVector(0.0f, 0.0f, 22.0f), 24.0f, 10.0f);
+			LCylinder(F, M::Trim, O + FVector(0.0f, 0.0f, 32.0f), 14.0f, 8.0f);
+			LOriented(F, M::Metal, O + FVector(0.0f, -18.0f, 34.0f), FVector(6.0f, 40.0f, 6.0f), FRotator(0.0f, 0.0f, 30.0f));
+			break;
+		default: // Radio mast.
+			LBox(F, M::Metal, O + FVector(-1.5f, -1.5f, 0.0f), O + FVector(1.5f, 1.5f, 160.0f));
+			for (int32 Bar = 0; Bar < 3; ++Bar)
+			{
+				const float BZ = 90.0f + Bar * 24.0f;
+				const float BW = 30.0f - Bar * 8.0f;
+				LBox(F, M::Metal, O + FVector(-BW, -1.0f, BZ), O + FVector(BW, 1.0f, BZ + 2.0f));
+			}
+			LBox(F, M::PaintRed, O + FVector(-3.0f, -3.0f, 160.0f), O + FVector(3.0f, 3.0f, 166.0f));
+			break;
+		}
+	}
+}
+
+FBox2D AHL2NeighborhoodsBlockout::HouseFootprint(const FHouse& H, int32 Id, bool bWithYard) const
+{
+	// Walls and jetties; the yard version adds the back lean-to when this address gets one.
+	const FFrame F{ H.FrontCenter, H.Facing, H.BaseZ };
+	const float HalfW = H.Width * 0.5f;
+	const float Back = H.Depth + (bWithYard && (Id * 7 + 2) % 6 == 3 ? 78.0f : 8.0f);
+	const FVector A = F.ToWorld(FVector(-HalfW, -8.0f, 0.0f));
+	const FVector B = F.ToWorld(FVector(HalfW, Back, 0.0f));
+	return FBox2D(FVector2D(FMath::Min(A.X, B.X), FMath::Min(A.Y, B.Y)), FVector2D(FMath::Max(A.X, B.X), FMath::Max(A.Y, B.Y)));
+}
+
+void AHL2NeighborhoodsBlockout::HouseRow(const FVector2D& FirstFront, const FVector2D& Step, int32 Count, int32 Facing, float MaxDepth,
+	uint32 ExtraFeatures, uint32 Seed, const TArray<FBox2D>& Avoid)
+{
+	using M = EHL2BlockoutMaterial;
+	const M Walls[] = { M::Plaster, M::PlasterBlue, M::PlasterWarm, M::PlasterSage, M::Brick, M::PlasterRose, M::TimberDark, M::PlasterOchre };
+	const M Roofs[] = { M::RoofRed, M::RoofSlate, M::RoofTeal, M::RoofOchre, M::RoofMoss };
+	const uint32 Shapes[] = { HF_Dormer, HF_Tower, HF_GableFront, HF_Dormer | HF_Balcony, HF_Stacked, HF_GableFront | HF_Balcony, HF_Tower | HF_Dormer, HF_None };
+	const float Spacing = FMath::Max(FMath::Abs(Step.X), FMath::Abs(Step.Y));
+	FRand R(Seed);
+
+	for (int32 Index = 0; Index < Count; ++Index)
+	{
+		const int32 Id = HouseCount;
+		FHouse H;
+		H.FrontCenter = FirstFront + FVector2D(Step.X * Index, Step.Y * Index);
+		H.Facing = Facing;
+		H.Width = FMath::Min(R.Range(240.0f, 300.0f), Spacing - 60.0f);
+		H.Depth = R.Range(MaxDepth - 60.0f, MaxDepth);
+		H.Storeys = 1 + static_cast<int32>(R.Range(0.0f, 2.99f));
+		H.Wall = Walls[(Id * 3) % 8];
+		H.Roof = Roofs[(Id * 2 + 1) % 5];
+		H.Features = Shapes[(Id * 5 + Index) % 8] | HF_Fence | ExtraFeatures | (R.Chance(0.5f) ? HF_Chimney : HF_None) | (R.Chance(0.3f) ? HF_Ivy : HF_None);
+		H.Seed = Seed * 7919u + static_cast<uint32>(Index) * 104729u;
+
+		const FBox2D Plot = HouseFootprint(H, Id, true);
+		if (OverlapsAny(Plot, HouseFootprints, 30.0f) || OverlapsAny(Plot, PavedAreas, 0.0f) || OverlapsAny(Plot, Avoid, 0.0f))
+		{
+			continue;
+		}
+		House(H);
+	}
 }
 
 void AHL2NeighborhoodsBlockout::TownBlock(const FFrame& F, float X0, float X1, uint32 Seed, bool bWorkshop)
@@ -777,38 +1198,47 @@ void AHL2NeighborhoodsBlockout::TownRow(const FFrame& F, float X0, float X1, con
 
 void AHL2NeighborhoodsBlockout::Scatter(const FVector2D& Min, const FVector2D& Max, float Spacing, float TreeChance, const TArray<FBox2D>& Avoid, uint32 Seed, float BaseZ)
 {
-	using M = EHL2BlockoutMaterial;
-	FRand R(Seed);
+	ScatterJobs.Add(FScatterJob{ Min, Max, Spacing, TreeChance, Avoid, Seed, BaseZ });
+}
 
-	TArray<FBox2D> Houses;
+void AHL2NeighborhoodsBlockout::RunScatter(const FScatterJob& Job)
+{
+	using M = EHL2BlockoutMaterial;
+	FRand R(Job.Seed);
+	const float Spacing = Job.Spacing;
+
+	TArray<FBox2D> Keep;
 	for (const FBox2D& Footprint : HouseFootprints)
 	{
-		Houses.Add(FBox2D(Footprint.Min - FVector2D(50.0f, 50.0f), Footprint.Max + FVector2D(50.0f, 50.0f)));
+		Keep.Add(Expand(Footprint, 50.0f));
+	}
+	for (const FBox2D& Paved : PavedAreas)
+	{
+		Keep.Add(Expand(Paved, 30.0f));
 	}
 
-	for (float Y = Min.Y + Spacing * 0.5f; Y < Max.Y; Y += Spacing)
+	for (float Y = Job.Min.Y + Spacing * 0.5f; Y < Job.Max.Y; Y += Spacing)
 	{
-		for (float X = Min.X + Spacing * 0.5f; X < Max.X; X += Spacing)
+		for (float X = Job.Min.X + Spacing * 0.5f; X < Job.Max.X; X += Spacing)
 		{
 			const FVector2D P(X + R.Range(-0.4f, 0.4f) * Spacing, Y + R.Range(-0.4f, 0.4f) * Spacing);
 			const float Roll = R.Next();
-			if (P.X < Min.X || P.X > Max.X || P.Y < Min.Y || P.Y > Max.Y || InsideAny(P, Avoid) || InsideAny(P, Houses))
+			if (P.X < Job.Min.X || P.X > Job.Max.X || P.Y < Job.Min.Y || P.Y > Job.Max.Y || InsideAny(P, Job.Avoid) || InsideAny(P, Keep))
 			{
 				continue;
 			}
-			const FVector Base(P.X, P.Y, BaseZ);
-			if (Roll < TreeChance)
+			const FVector Base(P.X, P.Y, Job.BaseZ + TerrainHeightAt(P));
+			if (Roll < Job.TreeChance)
 			{
 				Tree(Base, R.Range(0.8f, 1.5f), R.State);
 			}
-			else if (Roll < TreeChance + (1.0f - TreeChance) * 0.55f)
+			else if (Roll < Job.TreeChance + (1.0f - Job.TreeChance) * 0.55f)
 			{
 				Shrub(Base, R.Range(30.0f, 70.0f), R.State);
 			}
 			else
 			{
-				// Tall grass tuft, kept under step height.
-				Box(R.Chance(0.5f) ? M::Grass : M::Foliage, Base - FVector(14.0f, 10.0f, 0.0f), Base + FVector(14.0f, 10.0f, R.Range(6.0f, 14.0f)));
+				Box(Roll < 0.5f ? M::Grass : M::Foliage, Base - FVector(14.0f, 10.0f, 0.0f), Base + FVector(14.0f, 10.0f, R.Range(6.0f, 14.0f)));
 			}
 		}
 	}
@@ -828,6 +1258,7 @@ void AHL2NeighborhoodsBlockout::BuildGround()
 	Box(M::Grass, FVector(-Edge, -Edge, GroundBottomZ), FVector(Edge, CanalY0, 0.0f));
 	Box(M::Dirt, FVector(-Edge, CanalY0, GroundBottomZ), FVector(Edge, CanalY1, CanalBedZ));
 	Box(M::Water, FVector(-Edge, CanalY0, -72.0f), FVector(Edge, CanalY1, -64.0f));
+	MarkFlatXY(FVector2D(-Edge, CanalY0), FVector2D(Edge, CanalY1));
 }
 
 void AHL2NeighborhoodsBlockout::BuildPerimeter()
@@ -935,19 +1366,34 @@ void AHL2NeighborhoodsBlockout::BuildNorthSuburbs()
 	using M = EHL2BlockoutMaterial;
 
 	// Lantern Road (N-S) with T1 (Maple Lane, west) and T2 (Sparrow Close, east).
-	Road(false, 0.0f, 800.0f, 5600.0f, M::DarkConcrete, { FVector2D(3000.0f - 224.0f, 3000.0f + 224.0f) }, { FVector2D(4600.0f - 224.0f, 4600.0f + 224.0f) });
+	Road(false, 0.0f, 800.0f, 5600.0f, M::DarkConcrete, { FVector2D(3000.0f - 224.0f, 3000.0f + 224.0f), FVector2D(5480.0f - 224.0f, 5480.0f + 224.0f) },
+		{ FVector2D(4600.0f - 224.0f, 4600.0f + 224.0f), FVector2D(5480.0f - 224.0f, 5480.0f + 224.0f) });
 	Road(true, 3000.0f, -2930.0f, -160.0f, M::DarkConcrete, { FVector2D(-224.0f, -160.0f) }, { FVector2D(-224.0f, -160.0f) });
 	Road(true, 4600.0f, 160.0f, 2540.0f, M::DarkConcrete, { FVector2D(160.0f, 224.0f) }, { FVector2D(160.0f, 224.0f) });
 	CulDeSac(FVector2D(-3400.0f, 3000.0f), 480.0f, 0.0f);
 	CulDeSac(FVector2D(3000.0f, 4600.0f), 480.0f, 180.0f);
+	// Bramble Way (west) and Kettle Row (east) cross Lantern Road below the shrine; Thistle Row tees off Bramble Way.
+	Road(true, 5480.0f, -5440.0f, -160.0f, M::DarkConcrete, {}, { FVector2D(-560.0f, -160.0f) });
+	Road(false, -5600.0f, 1700.0f, 5704.0f, M::DarkConcrete, {}, { FVector2D(5480.0f - 224.0f, 5704.0f) });
+	Road(true, 5480.0f, 160.0f, 2560.0f, M::DarkConcrete, {}, {});
+	// Kettle Row's dead end: a footpath on to cul-de-sac 2.
+	DirtPath(FVector2D(2580.0f, 5100.0f), FVector2D(2700.0f, 5320.0f));
+	for (float X = -5000.0f; X < -400.0f; X += 600.0f)
+	{
+		Lantern(FVector(X, 5480.0f - 200.0f, 6.0f));
+	}
+	for (float Y = 2000.0f; Y < 5300.0f; Y += 600.0f)
+	{
+		Lantern(FVector(-5600.0f + 200.0f, Y, 6.0f));
+	}
 	for (float Y = 1100.0f; Y < 5600.0f; Y += 400.0f)
 	{
 		Lantern(FVector(-200.0f, Y, 6.0f));
 		Lantern(FVector(200.0f, Y + 200.0f, 6.0f));
 	}
 
-	const M Walls[] = { M::Plaster, M::PlasterWarm, M::Plaster, M::Brick, M::PlasterWarm };
-	const M Roofs[] = { M::RoofRed, M::RoofTeal, M::RoofRed };
+	const M Walls[] = { M::Plaster, M::PlasterWarm, M::PlasterBlue, M::Brick, M::PlasterRose };
+	const M Roofs[] = { M::RoofRed, M::RoofTeal, M::RoofSlate };
 	uint32 Seed = 100u;
 	auto Add = [&](float X, float Y, int32 Facing, float W, float D, int32 Storeys, uint32 Features)
 	{
@@ -998,6 +1444,15 @@ void AHL2NeighborhoodsBlockout::BuildNorthSuburbs()
 	Add(3000.0f, 5192.0f, 0, 340.0f, 320.0f, 2, HF_Tower | HF_Balcony);
 	Add(3592.0f, 4600.0f, 3, 300.0f, 300.0f, 2, HF_GableFront | HF_Dormer);
 	Add(3000.0f, 4008.0f, 2, 320.0f, 300.0f, 1, HF_Dormer | HF_Stacked);
+
+	// Bramble Way, Thistle Row and Kettle Row.
+	const float Front = RoadHalf + WalkWidth + 48.0f;
+	HouseRow(FVector2D(-760.0f, 5480.0f + Front), FVector2D(-360.0f, 0.0f), 13, 0, 300.0f, HF_None, 2101u);
+	HouseRow(FVector2D(-1300.0f, 5480.0f - Front), FVector2D(-360.0f, 0.0f), 11, 2, 280.0f, HF_None, 2102u);
+	HouseRow(FVector2D(-5600.0f + Front, 2100.0f), FVector2D(0.0f, 360.0f), 8, 3, 280.0f, HF_None, 2103u);
+	HouseRow(FVector2D(-5600.0f - Front, 2100.0f), FVector2D(0.0f, 360.0f), 10, 1, 260.0f, HF_None, 2104u);
+	HouseRow(FVector2D(700.0f, 5480.0f + Front), FVector2D(360.0f, 0.0f), 6, 0, 300.0f, HF_None, 2105u);
+	HouseRow(FVector2D(1660.0f, 5480.0f - Front), FVector2D(360.0f, 0.0f), 3, 2, 270.0f, HF_None, 2106u);
 
 	// Driveways and garden paths.
 	DirtPath(FVector2D(-3910.0f, 3200.0f), FVector2D(-3790.0f, 3592.0f));
@@ -1339,7 +1794,17 @@ void AHL2NeighborhoodsBlockout::BuildCanalQuarter()
 	using M = EHL2BlockoutMaterial;
 
 	// Canal Walk (cobbled lane) from the hub to the promenade.
-	Road(false, 0.0f, -4140.0f, -800.0f, M::Tile, {}, {});
+	Road(false, 0.0f, -4140.0f, -800.0f, M::Tile, {}, { FVector2D(-3250.0f - 224.0f, -3250.0f + 224.0f) });
+
+	// Cinder Lane: east off Canal Walk, then a footpath on to cul-de-sac 3.
+	Road(true, -3250.0f, 160.0f, 2240.0f, M::DarkConcrete, {}, {});
+	DirtPath(FVector2D(2240.0f, -3400.0f), FVector2D(2780.0f, -3260.0f));
+	HouseRow(FVector2D(520.0f, -3250.0f + RoadHalf + WalkWidth + 48.0f), FVector2D(360.0f, 0.0f), 5, 0, 280.0f, HF_None, 2201u);
+
+	// Weir Street along the far bank, reached over the drawbridge or the broken footbridge.
+	Road(true, -5700.0f, -2780.0f, 2300.0f, M::Tile, { }, { FVector2D(-224.0f, 224.0f) });
+	Road(false, 0.0f, -5476.0f, -5000.0f, M::Tile, {}, {});
+	DirtPath(FVector2D(-1680.0f, -5476.0f), FVector2D(-1520.0f, -5000.0f));
 	Box(M::Tile, FVector(-2800.0f, -4600.0f, 0.0f), FVector(2320.0f, -4140.0f, 4.0f));
 	for (float X = -2700.0f; X < 2300.0f; X += 160.0f)
 	{
@@ -1417,6 +1882,12 @@ void AHL2NeighborhoodsBlockout::BuildCanalQuarter()
 	OrientedBox(M::Brick, FVector(1320.0f, -5280.0f, 560.0f), FVector(240.0f, 240.0f, 80.0f), FRotator(8.0f, 0.0f, 6.0f));
 	Box(M::Vines, FVector(1196.0f, -5380.0f, 80.0f), FVector(1200.0f, -5200.0f, 480.0f));
 	Box(M::Marker, FVector(1300.0f, -5164.0f, 40.0f), FVector(1340.0f, -5160.0f, 80.0f));
+
+	// Weir Street houses; the lock tower plot is kept clear.
+	const TArray<FBox2D> LockTower = { FBox2D(FVector2D(1150.0f, -5450.0f), FVector2D(1490.0f, -5110.0f)) };
+	const float WeirFront = RoadHalf + WalkWidth + 48.0f;
+	HouseRow(FVector2D(-2600.0f, -5700.0f + WeirFront), FVector2D(360.0f, 0.0f), 14, 0, 240.0f, HF_Ivy, 2202u, LockTower);
+	HouseRow(FVector2D(-2600.0f, -5700.0f - WeirFront), FVector2D(360.0f, 0.0f), 14, 2, 250.0f, HF_None, 2203u);
 
 	const TArray<FBox2D> NearAvoid = { FBox2D(FVector2D(-260.0f, -4160.0f), FVector2D(260.0f, -3580.0f)) };
 	Scatter(FVector2D(-2780.0f, -3940.0f), FVector2D(2300.0f, -3700.0f), 200.0f, 0.25f, NearAvoid, 703u);
@@ -1531,6 +2002,14 @@ void AHL2NeighborhoodsBlockout::BuildGrove()
 	}
 	Box(M::Concrete, FVector(-6000.0f, -60.0f, 0.0f), FVector(-5900.0f, 60.0f, 40.0f));
 	Box(M::Marker, FVector(-5966.0f, -16.0f, 40.0f), FVector(-5934.0f, 16.0f, 64.0f));
+
+	// Woodcutters' hamlet along the grove path.
+	const TArray<FBox2D> HamletAvoid = {
+		FBox2D(FVector2D(-5450.0f, -1120.0f), FVector2D(-4950.0f, -660.0f)),
+		FBox2D(FVector2D(-4560.0f, 160.0f), FVector2D(-4040.0f, 700.0f)),
+	};
+	HouseRow(FVector2D(-5250.0f, 216.0f), FVector2D(380.0f, 0.0f), 7, 0, 280.0f, HF_Ivy, 2301u, HamletAvoid);
+	HouseRow(FVector2D(-5250.0f, -216.0f), FVector2D(380.0f, 0.0f), 7, 2, 280.0f, HF_Ivy, 2302u, HamletAvoid);
 
 	const TArray<FBox2D> HeartAvoid = {
 		FBox2D(FVector2D(-6100.0f, -160.0f), FVector2D(-2440.0f, 160.0f)),

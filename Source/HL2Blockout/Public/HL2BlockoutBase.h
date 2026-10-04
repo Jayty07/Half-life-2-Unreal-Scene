@@ -42,6 +42,19 @@ enum class EHL2BlockoutMaterial : uint8
 	Vines,
 	/** Bright placeholder for gameplay spots (blockers, hidden caches, robot). */
 	Marker,
+	/** Extra wall, roof and paint colours so individual houses are easy to tell apart. */
+	PlasterBlue,
+	PlasterRose,
+	PlasterSage,
+	PlasterOchre,
+	TimberDark,
+	RoofSlate,
+	RoofOchre,
+	RoofMoss,
+	PaintRed,
+	PaintBlue,
+	PaintYellow,
+	PaintGreen,
 	Count UMETA(Hidden)
 };
 
